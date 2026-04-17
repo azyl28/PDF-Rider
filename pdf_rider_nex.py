@@ -25,7 +25,10 @@ import shutil
 from datetime import datetime
 
 from app.gui.widgets.ocr_dialog import OcrDialog
-from app.tools.edit_tools import PdfEditTools
+from tools.edit_tools import PdfEditTools
+from tools.page_tools import PageTools
+from tools.security_tools import SecurityTools
+from tools.settings_tools import SettingsTools
 
 
 # ============================================================================
@@ -289,6 +292,10 @@ class PdfViewer(QScrollArea):
         self.pending_comment = None
         self.pending_note = None
         self.pending_signature = None
+        self.pending_remove = False
+        self.pending_image = None
+        self.pending_shape = None
+        self.pending_font_change = False
         
     def load_document(self, doc):
         self.clear()
@@ -354,6 +361,17 @@ class PdfViewer(QScrollArea):
             self.add_signature_at_position(page_idx, self.pending_signature, pos)
             self.pending_signature = None
             self.tool_mode = "select"
+        elif self.tool_mode == "remove" and self.pending_remove:
+            # Usuwanie wymaga zaznaczenia obszaru, więc to w on_mouse_release
+            pass
+        elif self.tool_mode == "image" and self.pending_image:
+            self.add_image_at_position(page_idx, self.pending_image, pos)
+            self.pending_image = None
+            self.tool_mode = "select"
+        elif self.tool_mode == "shape" and self.pending_shape:
+            self.add_shape_at_position(page_idx, self.pending_shape, pos)
+            self.pending_shape = None
+            self.tool_mode = "select"
             
     def on_page_mouse_move(self, page_idx, pos):
         if self.selecting and self.tool_mode == "select" and page_idx == self.current_page:
@@ -405,6 +423,31 @@ class PdfViewer(QScrollArea):
         y = pos.y() / self.zoom
         rect = fitz.Rect(x, y, x + 150, y + 75)
         page.insert_image(rect, filename=image_path)
+        self.refresh_all_pages()
+
+    def add_image_at_position(self, page_idx, image_path, pos):
+        if not self.current_doc or page_idx >= self.total_pages:
+            return
+        page = self.current_doc[page_idx]
+        x = pos.x() / self.zoom
+        y = pos.y() / self.zoom
+        rect = fitz.Rect(x, y, x + 200, y + 150)
+        page.insert_image(rect, filename=image_path)
+        self.refresh_all_pages()
+
+    def add_shape_at_position(self, page_idx, shape_type, pos):
+        if not self.current_doc or page_idx >= self.total_pages:
+            return
+        page = self.current_doc[page_idx]
+        x = pos.x() / self.zoom
+        y = pos.y() / self.zoom
+        rect = fitz.Rect(x, y, x + 100, y + 100)
+
+        if shape_type == "rectangle":
+            page.draw_rect(rect, color=(0, 0, 0), width=2)
+        elif shape_type == "circle":
+            center = (x + 50, y + 50)
+            page.draw_circle(center, 50, color=(0, 0, 0), width=2)
         self.refresh_all_pages()
             
     def set_zoom(self, zoom):
@@ -1060,6 +1103,9 @@ class PdfMasterTab(QWidget):
         self.current_file = None
         self.settings = QSettings("PDFRiderNex", "Settings")
         self.edit_tools = None
+        self.page_tools = None
+        self.security_tools = None
+        self.settings_tools = None
         self.has_unsaved_changes = False
         self.setup_ui()
 
@@ -1260,7 +1306,7 @@ class PdfMasterTab(QWidget):
         layout = QHBoxLayout(tab)
         layout.setContentsMargins(10, 5, 10, 5)
         layout.setSpacing(8)
-        
+
         self.add_page_btn = self.create_tool_btn("➕ Dodaj stronę")
         self.add_page_btn.clicked.connect(self.add_page)
         self.delete_page_btn = self.create_tool_btn("🗑️ Usuń stronę")
@@ -1271,8 +1317,17 @@ class PdfMasterTab(QWidget):
         self.rotate_btn.clicked.connect(self.rotate_page)
         self.numbering_btn = self.create_tool_btn("🔢 Numeracja")
         self.numbering_btn.clicked.connect(self.add_numbering)
-        
-        for btn in [self.add_page_btn, self.delete_page_btn, self.duplicate_page_btn, self.rotate_btn, self.numbering_btn]:
+        self.split_page_btn = self.create_tool_btn("✂️ Podziel stronę")
+        self.split_page_btn.clicked.connect(self.split_page)
+        self.merge_pages_btn = self.create_tool_btn("🔗 Scal strony")
+        self.merge_pages_btn.clicked.connect(self.merge_pages)
+        self.rotate_all_btn = self.create_tool_btn("🔄 Obróć wszystkie")
+        self.rotate_all_btn.clicked.connect(self.rotate_all_pages)
+        self.resize_page_btn = self.create_tool_btn("📏 Zmień rozmiar")
+        self.resize_page_btn.clicked.connect(self.resize_page)
+
+        for btn in [self.add_page_btn, self.delete_page_btn, self.duplicate_page_btn, self.rotate_btn, self.numbering_btn,
+                    self.split_page_btn, self.merge_pages_btn, self.rotate_all_btn, self.resize_page_btn]:
             layout.addWidget(btn)
         layout.addStretch()
         return tab
@@ -1282,7 +1337,7 @@ class PdfMasterTab(QWidget):
         layout = QHBoxLayout(tab)
         layout.setContentsMargins(10, 5, 10, 5)
         layout.setSpacing(8)
-        
+
         self.add_text_btn = self.create_tool_btn("📝 Dodaj tekst")
         self.add_text_btn.clicked.connect(self.add_text)
         self.highlight_btn = self.create_tool_btn("🟡 Zaznacz")
@@ -1293,8 +1348,17 @@ class PdfMasterTab(QWidget):
         self.note_btn.clicked.connect(self.add_note)
         self.signature_btn = self.create_tool_btn("✍️ Podpis")
         self.signature_btn.clicked.connect(self.add_signature)
-        
-        for btn in [self.add_text_btn, self.highlight_btn, self.comment_btn, self.note_btn, self.signature_btn]:
+        self.remove_text_btn = self.create_tool_btn("🗑️ Usuń tekst")
+        self.remove_text_btn.clicked.connect(self.remove_text)
+        self.add_image_btn = self.create_tool_btn("🖼️ Dodaj obraz")
+        self.add_image_btn.clicked.connect(self.add_image)
+        self.add_shape_btn = self.create_tool_btn("⬜ Dodaj kształt")
+        self.add_shape_btn.clicked.connect(self.add_shape)
+        self.change_font_btn = self.create_tool_btn("🔤 Zmień czcionkę")
+        self.change_font_btn.clicked.connect(self.change_font)
+
+        for btn in [self.add_text_btn, self.highlight_btn, self.comment_btn, self.note_btn, self.signature_btn,
+                    self.remove_text_btn, self.add_image_btn, self.add_shape_btn, self.change_font_btn]:
             layout.addWidget(btn)
         layout.addStretch()
         return tab
@@ -1304,13 +1368,22 @@ class PdfMasterTab(QWidget):
         layout = QHBoxLayout(tab)
         layout.setContentsMargins(10, 5, 10, 5)
         layout.setSpacing(8)
-        
+
         self.password_btn = self.create_tool_btn("🔒 Dodaj hasło")
         self.password_btn.clicked.connect(self.add_password)
         self.verify_signature_btn = self.create_tool_btn("🔍 Weryfikuj podpis")
         self.verify_signature_btn.clicked.connect(self.verify_signature)
-        
-        for btn in [self.password_btn, self.verify_signature_btn]:
+        self.remove_password_btn = self.create_tool_btn("🔓 Usuń hasło")
+        self.remove_password_btn.clicked.connect(self.remove_password)
+        self.change_password_btn = self.create_tool_btn("🔑 Zmień hasło")
+        self.change_password_btn.clicked.connect(self.change_password)
+        self.add_watermark_btn = self.create_tool_btn("💧 Dodaj watermark")
+        self.add_watermark_btn.clicked.connect(self.add_watermark)
+        self.check_permissions_btn = self.create_tool_btn("🔐 Sprawdź uprawnienia")
+        self.check_permissions_btn.clicked.connect(self.check_permissions)
+
+        for btn in [self.password_btn, self.verify_signature_btn, self.remove_password_btn,
+                    self.change_password_btn, self.add_watermark_btn, self.check_permissions_btn]:
             layout.addWidget(btn)
         layout.addStretch()
         return tab
@@ -1340,11 +1413,17 @@ class PdfMasterTab(QWidget):
         layout = QHBoxLayout(tab)
         layout.setContentsMargins(10, 5, 10, 5)
         layout.setSpacing(8)
-        
+
         self.zoom_default_btn = self.create_tool_btn("🔍 Domyślny zoom")
+        self.zoom_default_btn.clicked.connect(self.set_default_zoom)
         self.theme_btn = self.create_tool_btn("🎨 Motyw")
-        
-        for btn in [self.zoom_default_btn, self.theme_btn]:
+        self.theme_btn.clicked.connect(self.change_theme)
+        self.language_btn = self.create_tool_btn("🌐 Język")
+        self.language_btn.clicked.connect(self.set_language)
+        self.save_settings_btn = self.create_tool_btn("💾 Zapisz ustawienia")
+        self.save_settings_btn.clicked.connect(self.save_settings)
+
+        for btn in [self.zoom_default_btn, self.theme_btn, self.language_btn, self.save_settings_btn]:
             layout.addWidget(btn)
         layout.addStretch()
         return tab
@@ -1392,6 +1471,19 @@ class PdfMasterTab(QWidget):
             self.set_status(f"Dodano tekst")
             self.set_unsaved()
             self.viewer.pending_text = None
+        elif hasattr(self.viewer, 'pending_remove') and self.viewer.pending_remove:
+            if self.edit_tools and self.edit_tools.remove_text(self.viewer.current_page, rect):
+                self.viewer.refresh_all_pages()
+                self.set_unsaved()
+            self.viewer.pending_remove = False
+            self.viewer.tool_mode = "select"
+        elif hasattr(self.viewer, 'pending_font_change') and self.viewer.pending_font_change:
+            # Prosta zmiana czcionki na przykładową
+            if self.edit_tools and self.edit_tools.change_font(self.viewer.current_page, rect):
+                self.viewer.refresh_all_pages()
+                self.set_unsaved()
+            self.viewer.pending_font_change = False
+            self.viewer.tool_mode = "select"
 
     # ========================================================================
     # FUNKCJE PDF
@@ -1405,6 +1497,9 @@ class PdfMasterTab(QWidget):
                 self.viewer.load_document(self.current_doc)
                 self.thumb.load_document(self.current_doc)
                 self.edit_tools = PdfEditTools(self.viewer, self.current_doc, self.set_status)
+                self.page_tools = PageTools(self.current_doc, self.set_status)
+                self.security_tools = SecurityTools(self.current_doc, path, self.set_status)
+                self.settings_tools = SettingsTools(self.main_window)
                 self.update_ui()
                 self.set_status(f"Otwarto: {os.path.basename(path)}")
                 self.settings.setValue("last_file", path)
@@ -1745,3 +1840,154 @@ class PdfMasterTab(QWidget):
         if self.current_doc:
             self.page_label.setText(f"Strona: {self.viewer.current_page + 1}/{self.current_doc.page_count}")
             self.thumb.highlight_page(self.viewer.current_page)
+
+    # ========================================================================
+    # NOWE FUNKCJE NARZĘDZI STRONY
+    # ========================================================================
+    def split_page(self):
+        if not self.page_tools:
+            show_warning(self, "Uwaga", "Najpierw otwórz PDF")
+            return
+        # Proste dzielenie pionowe dla bieżącej strony
+        if self.page_tools.split_page(self.viewer.current_page, "vertical"):
+            self.viewer.refresh_all_pages()
+            self.thumb.load_document(self.current_doc)
+            self.set_unsaved()
+
+    def merge_pages(self):
+        if not self.page_tools or not self.current_doc:
+            show_warning(self, "Uwaga", "Najpierw otwórz PDF")
+            return
+        # Scal bieżącą stronę z następną
+        if self.viewer.current_page + 1 < len(self.current_doc):
+            page_indices = [self.viewer.current_page, self.viewer.current_page + 1]
+            if self.page_tools.merge_pages(page_indices):
+                self.viewer.load_document(self.current_doc)
+                self.thumb.load_document(self.current_doc)
+                self.update_ui()
+                self.set_unsaved()
+
+    def rotate_all_pages(self):
+        if not self.page_tools:
+            show_warning(self, "Uwaga", "Najpierw otwórz PDF")
+            return
+        angle, ok = QInputDialog.getInt(self, "Obróć wszystkie strony", "Kąt obrotu (w stopniach):", 90, -360, 360, 90)
+        if ok and self.page_tools.rotate_all_pages(angle):
+            self.viewer.refresh_all_pages()
+            self.set_unsaved()
+
+    def resize_page(self):
+        if not self.page_tools:
+            show_warning(self, "Uwaga", "Najpierw otwórz PDF")
+            return
+        width, ok1 = QInputDialog.getInt(self, "Zmień rozmiar strony", "Szerokość (punkty):", 595, 100, 2000)
+        if ok1:
+            height, ok2 = QInputDialog.getInt(self, "Zmień rozmiar strony", "Wysokość (punkty):", 842, 100, 2000)
+            if ok2 and self.page_tools.resize_page(self.viewer.current_page, width, height):
+                self.viewer.refresh_all_pages()
+                self.set_unsaved()
+
+    # ========================================================================
+    # NOWE FUNKCJE NARZĘDZI EDYCJI
+    # ========================================================================
+    def remove_text(self):
+        if not self.edit_tools:
+            show_warning(self, "Uwaga", "Najpierw otwórz PDF")
+            return
+        self.viewer.pending_remove = True
+        self.viewer.set_tool_mode("remove")
+        self.set_status("Zaznacz obszar tekstu do usunięcia")
+
+    def add_image(self):
+        if not self.edit_tools:
+            show_warning(self, "Uwaga", "Najpierw otwórz PDF")
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Wybierz obraz", "", "Obrazy (*.png *.jpg *.jpeg *.bmp)")
+        if path:
+            self.viewer.pending_image = path
+            self.viewer.set_tool_mode("image")
+            self.set_status("Kliknij na stronie, aby dodać obraz")
+
+    def add_shape(self):
+        if not self.edit_tools:
+            show_warning(self, "Uwaga", "Najpierw otwórz PDF")
+            return
+        shape, ok = QInputDialog.getItem(self, "Dodaj kształt", "Wybierz kształt:", ["rectangle", "circle"], 0, False)
+        if ok:
+            self.viewer.pending_shape = shape
+            self.viewer.set_tool_mode("shape")
+            self.set_status(f"Kliknij na stronie, aby dodać {shape}")
+
+    def change_font(self):
+        if not self.edit_tools:
+            show_warning(self, "Uwaga", "Najpierw otwórz PDF")
+            return
+        self.viewer.pending_font_change = True
+        self.viewer.set_tool_mode("font")
+        self.set_status("Zaznacz tekst do zmiany czcionki")
+
+    # ========================================================================
+    # NOWE FUNKCJE NARZĘDZI ZABEZPIECZEŃ
+    # ========================================================================
+    def remove_password(self):
+        if not self.security_tools:
+            show_warning(self, "Uwaga", "Najpierw otwórz PDF")
+            return
+        password, ok = QInputDialog.getText(self, "Usuń hasło", "Wprowadź hasło:", QLineEdit.Password)
+        if ok and self.security_tools.remove_password(password):
+            self.clear_unsaved()
+
+    def change_password(self):
+        if not self.security_tools:
+            show_warning(self, "Uwaga", "Najpierw otwórz PDF")
+            return
+        old_pass, ok1 = QInputDialog.getText(self, "Zmień hasło", "Stare hasło:", QLineEdit.Password)
+        if ok1:
+            new_pass, ok2 = QInputDialog.getText(self, "Zmień hasło", "Nowe hasło:", QLineEdit.Password)
+            if ok2 and self.security_tools.change_password(old_pass, new_pass):
+                self.clear_unsaved()
+
+    def add_watermark(self):
+        if not self.security_tools:
+            show_warning(self, "Uwaga", "Najpierw otwórz PDF")
+            return
+        text, ok = QInputDialog.getText(self, "Dodaj watermark", "Tekst watermark:")
+        if ok and self.security_tools.add_watermark(text):
+            self.viewer.refresh_all_pages()
+            self.set_unsaved()
+
+    def check_permissions(self):
+        if not self.security_tools:
+            show_warning(self, "Uwaga", "Najpierw otwórz PDF")
+            return
+        perms = self.security_tools.check_permissions()
+        show_info(self, "Uprawnienia", perms)
+
+    # ========================================================================
+    # NOWE FUNKCJE USTAWIEŃ
+    # ========================================================================
+    def set_default_zoom(self):
+        if not self.settings_tools:
+            return
+        zoom, ok = QInputDialog.getInt(self, "Domyślny zoom", "Poziom zoomu (%):", 100, 30, 300)
+        if ok:
+            self.settings_tools.set_default_zoom(zoom)
+
+    def change_theme(self):
+        if not self.settings_tools:
+            return
+        theme, ok = QInputDialog.getItem(self, "Zmień motyw", "Wybierz motyw:", ["dark", "light"], 0, False)
+        if ok:
+            self.settings_tools.change_theme(theme)
+
+    def set_language(self):
+        if not self.settings_tools:
+            return
+        lang, ok = QInputDialog.getItem(self, "Zmień język", "Wybierz język:", ["pl", "en"], 0, False)
+        if ok:
+            self.settings_tools.set_language(lang)
+
+    def save_settings(self):
+        if not self.settings_tools:
+            return
+        self.settings_tools.save_settings()
